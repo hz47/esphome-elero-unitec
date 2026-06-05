@@ -1,0 +1,140 @@
+# WIDE FREQ FINDER + signal meter. Sweeps FREQ1 over a wide range (big steps), and at
+# each step reports the PEAK signal strength it heard AND the chip's frequency-error
+# estimate, plus decodes a real packet if it lands on the right frequency.
+#
+# This answers two things at once:
+#   - If peakRSSI JUMPS (to ~ -30..-65) at some FREQ1 -> the remote IS being heard, and
+#     that FREQ1 is closest. FREQEST then tells us the fine correction.
+#   - If peakRSSI stays flat (~ -90) at EVERY FREQ1 while you hold the remote -> the
+#     remote isn't reaching the module (not held / not transmitting).
+#
+# RUN: flash, open Logs, and HOLD an Elero remote button DOWN on top of the module for
+# the whole run (~30s per full pass). Watch for the line with the strongest peakRSSI,
+# and any line containing "DECODED".
+
+esphome:
+  name: esp-milos
+  friendly_name: esp-milos
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          id(cc).enable(); id(cc).transfer_byte(0x30); id(cc).disable();   // SRES
+          delay(5);
+          const uint8_t regs[][2] = {
+            {0x0B,0x08},{0x0C,0x00},
+            {0x0D,0x21},{0x0E,0x71},{0x0F,0x7A},   // FREQ2/1/0 (FREQ1 will be swept)
+            {0x10,0x7B},{0x11,0x83},{0x12,0x13},{0x13,0x52},{0x14,0xF8},
+            {0x0A,0x00},{0x15,0x43},{0x21,0xB6},{0x22,0x10},
+            {0x18,0x18},{0x17,0x3F},{0x19,0x1D},{0x1A,0x1F},
+            {0x1B,0xC7},{0x1C,0x00},{0x1D,0xB2},
+            {0x23,0xEA},{0x24,0x2A},{0x25,0x00},{0x26,0x1F},
+            {0x29,0x59},{0x2C,0x81},{0x2D,0x35},{0x2E,0x09},
+            {0x02,0x06},{0x07,0x8C},{0x08,0x45},{0x09,0x00},
+            {0x06,0x3C},{0x04,0xD3},{0x05,0x91}
+          };
+          for (auto &r : regs) {
+            id(cc).enable(); id(cc).transfer_byte(r[0]); id(cc).transfer_byte(r[1]); id(cc).disable();
+            delayMicroseconds(20);
+          }
+          id(cc).enable(); id(cc).transfer_byte(0x34); id(cc).disable();   // SRX
+          ESP_LOGI("freq", "Wide sweep. HOLD the remote on the module the whole time.");
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  interface: software
+
+spi_device:
+  id: cc
+  cs_pin: GPIO4
+  spi_mode: 0
+  data_rate: 200kHz
+
+globals:
+  - id: f1
+    type: uint8_t
+    restore_value: false
+    initial_value: '0x6A'
+
+interval:
+  - interval: 1200ms
+    then:
+      - lambda: |-
+          // Program current FREQ1 (with FREQ0=0x7A) and enter RX.
+          id(cc).enable(); id(cc).transfer_byte(0x36); id(cc).disable(); delayMicroseconds(80);  // SIDLE
+          id(cc).enable(); id(cc).transfer_byte(0x3A); id(cc).disable(); delayMicroseconds(40);  // SFRX
+          id(cc).enable(); id(cc).transfer_byte(0x0E); id(cc).transfer_byte(id(f1)); id(cc).disable(); delayMicroseconds(20);
+          id(cc).enable(); id(cc).transfer_byte(0x0F); id(cc).transfer_byte(0x7A);   id(cc).disable(); delayMicroseconds(20);
+          id(cc).enable(); id(cc).transfer_byte(0x34); id(cc).disable();                          // SRX
+
+          float peak = -200.0f;
+          int8_t freqest = 0;
+          bool decoded = false;
+          uint32_t dsrc = 0;
+          uint32_t start = millis();
+          while (millis() - start < 1000) {
+            // RSSI
+            uint8_t r1=0,r2=0; int t=0;
+            do { id(cc).enable(); id(cc).transfer_byte(0x34|0xC0); r1=id(cc).transfer_byte(0x00); id(cc).disable();
+                 id(cc).enable(); id(cc).transfer_byte(0x34|0xC0); r2=id(cc).transfer_byte(0x00); id(cc).disable(); t++; } while(r1!=r2 && t<10);
+            float rssi = (r1>=128) ? ((float)(r1-256)/2.0f-74.0f) : ((float)r1/2.0f-74.0f);
+            if (rssi > peak) {
+              peak = rssi;
+              uint8_t e1=0,e2=0; t=0;
+              do { id(cc).enable(); id(cc).transfer_byte(0x32|0xC0); e1=id(cc).transfer_byte(0x00); id(cc).disable();
+                   id(cc).enable(); id(cc).transfer_byte(0x32|0xC0); e2=id(cc).transfer_byte(0x00); id(cc).disable(); t++; } while(e1!=e2 && t<10);
+              freqest = (int8_t)e1;
+            }
+            // Decode attempt
+            uint8_t b1=0,b2=0; t=0;
+            do { id(cc).enable(); id(cc).transfer_byte(0x3B|0xC0); b1=id(cc).transfer_byte(0x00); id(cc).disable();
+                 id(cc).enable(); id(cc).transfer_byte(0x3B|0xC0); b2=id(cc).transfer_byte(0x00); id(cc).disable(); t++; } while(b1!=b2 && t<10);
+            uint8_t n = b1 & 0x7F;
+            if (n >= 26 && n <= 40) {
+              uint8_t buf[64];
+              id(cc).enable(); id(cc).transfer_byte(0x3F|0xC0);
+              for (uint8_t i=0;i<n;i++) buf[i]=id(cc).transfer_byte(0x00);
+              id(cc).disable();
+              if (buf[5]==0x01) { decoded=true; dsrc=((uint32_t)buf[7]<<16)|((uint32_t)buf[8]<<8)|buf[9]; }
+              id(cc).enable(); id(cc).transfer_byte(0x36); id(cc).disable(); delayMicroseconds(60);
+              id(cc).enable(); id(cc).transfer_byte(0x3A); id(cc).disable(); delayMicroseconds(40);
+              id(cc).enable(); id(cc).transfer_byte(0x34); id(cc).disable();
+            }
+            delayMicroseconds(600);
+          }
+
+          float khz = freqest * 1.587f;
+          if (decoded)
+            ESP_LOGI("freq", "FREQ1=0x%02X  peakRSSI=%4.0f  FREQEST=%+d (%+.0fkHz)  *** DECODED src=0x%06X  <=== USE FREQ1=0x%02X ***",
+                     id(f1), peak, freqest, khz, dsrc, id(f1));
+          else if (peak > -70.0f)
+            ESP_LOGI("freq", "FREQ1=0x%02X  peakRSSI=%4.0f  FREQEST=%+d (%+.0fkHz)  <-- SIGNAL HERE",
+                     id(f1), peak, freqest, khz);
+          else
+            ESP_LOGI("freq", "FREQ1=0x%02X  peakRSSI=%4.0f  (quiet)", id(f1), peak);
+
+          // Advance FREQ1 by 1 each cycle across 0x6A..0x78, then wrap.
+          id(f1) = (id(f1) >= 0x78) ? 0x6A : (uint8_t)(id(f1) + 1);

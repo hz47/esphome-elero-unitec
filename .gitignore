@@ -1,0 +1,12 @@
+# ESPHome secrets and build artifacts
+secrets.yaml
+.esphome/
+*.bin
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+__pycache__/
+*.pyc

@@ -1,0 +1,85 @@
+# GDO0 wire test (with read-back debugging).
+# Forces the CC1101's GDO0 pin HIGH then LOW every 3s, and at the START of each
+# cycle reads what GPIO27 actually saw from the PREVIOUS forced level.
+#
+# GOOD -> "GPIO27 reads" alternates HIGH/LOW, matching what was forced.
+# BAD  -> "GPIO27 reads" stays the SAME value forever = GPIO27<->GDO0 wire dead
+#         (broken joint, not connected, or on the wrong pad GDO2).
+
+esphome:
+  name: esp-milos
+  friendly_name: esp-milos
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(cc).enable();
+          id(cc).transfer_byte(0x30);   // SRES
+          id(cc).disable();
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  interface: software
+
+spi_device:
+  id: cc
+  cs_pin: GPIO4
+  spi_mode: 0
+  data_rate: 1MHz
+
+globals:
+  - id: hi
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO26
+      mode: INPUT_PULLDOWN
+    name: "GDO0 wire test"
+    id: gdo0_in
+
+interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          // 1) Read what GPIO27 saw from the level we forced LAST cycle
+          bool reads = id(gdo0_in).state;
+          ESP_LOGI("gdo0", "READBACK: GPIO26 reads %s  (it was forced %s last cycle) -> %s",
+                   reads ? "HIGH" : "LOW",
+                   id(hi) ? "HIGH" : "LOW",
+                   (reads == id(hi)) ? "MATCH (wire OK)" : "MISMATCH (check wire)");
+
+          // 2) Flip and force the new level on the CC1101's GDO0 pin
+          id(hi) = !id(hi);
+          uint8_t v = id(hi) ? 0x6F : 0x2F;   // 0x6F=HIGH, 0x2F=LOW, reg IOCFG0=0x02
+          id(cc).enable();
+          id(cc).transfer_byte(0x02);
+          id(cc).transfer_byte(v);
+          id(cc).disable();
+          ESP_LOGI("gdo0", "==> Now forcing GDO0 %s (next readback should be %s)",
+                   id(hi) ? "HIGH" : "LOW", id(hi) ? "HIGH" : "LOW");

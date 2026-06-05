@@ -1,0 +1,81 @@
+# TEMPORARY CC1101 wiring/self-test for Home Assistant (ESPHome)
+# Flash this in the ESPHome dashboard, then open Logs.
+# It reads the CC1101 chip ID over SPI every 3 seconds.
+#
+# EXPECTED on a healthy chip:
+#   PARTNUM=0x00  VERSION=0x14   (clones may show 0x04/0x07 - still alive)
+# BAD (not wired / no power / wrong pin):
+#   VERSION=0x00 or 0xFF
+#
+# After testing, flash your normal elero config again.
+
+esphome:
+  name: esp-milos
+  friendly_name: esp-milos
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Same SPI pins as your elero config
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  interface: software
+
+spi_device:
+  id: cc1101
+  cs_pin: GPIO4
+  spi_mode: 0
+  data_rate: 1MHz
+
+interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          // Reset pulse: toggle CS, then SRES strobe (0x30)
+          id(cc1101).enable();
+          delayMicroseconds(40);
+          id(cc1101).transfer_byte(0x30);   // SRES
+          id(cc1101).disable();
+          delay(5);
+
+          // WRITE test: put 0x2D into config reg IOCFG2 (0x00), then read it back (0x80)
+          id(cc1101).enable();
+          id(cc1101).transfer_byte(0x00);   // write addr IOCFG2
+          id(cc1101).transfer_byte(0x2D);   // value
+          id(cc1101).disable();
+          delayMicroseconds(20);
+          id(cc1101).enable();
+          id(cc1101).transfer_byte(0x80);   // read addr IOCFG2
+          uint8_t readback = id(cc1101).transfer_byte(0x00);
+          id(cc1101).disable();
+
+          // Read VERSION (status reg 0x31 -> 0xF1)
+          id(cc1101).enable();
+          id(cc1101).transfer_byte(0xF1);
+          uint8_t version = id(cc1101).transfer_byte(0x00);
+          id(cc1101).disable();
+
+          if (readback == 0x2D) {
+            ESP_LOGI("cc1101", "VERSION=0x%02X  readback=0x2D --> CHIP ALIVE, SPI OK!", version);
+          } else {
+            ESP_LOGW("cc1101", "VERSION=0x%02X  readback=0x%02X (wanted 0x2D) --> NO SPI COMMS (power/MISO/CSN/dead chip)", version, readback);
+          }

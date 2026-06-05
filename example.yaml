@@ -1,0 +1,106 @@
+# Example ESPHome configuration for esphome-elero-unitec.
+#
+# Requires the component at  components/elero/  next to this file (see README).
+# Fill in your own values from the bring-up steps in the README:
+#   - freq0           -> from tools/03-freq0-finder.yaml
+#   - blind_address, channel, remote_address, pck_inf*, hop, payload_*, command_*
+#                     -> read off the DEBUG log while pressing your real remote
+
+esphome:
+  name: elero-blinds
+  friendly_name: Elero Blinds
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+# DEBUG = verbose diagnostics for bring-up (heartbeat, raw RX/TX).
+# Switch to INFO for normal daily use to quiet the logs.
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  # Software SPI is more reliable on clone CC1101 modules than hardware SPI.
+  interface: software
+
+elero:
+  cs_pin: GPIO4
+  # GDO0 isn't used (the component polls the RX FIFO). Pull-down so a floating/
+  # disconnected pin can't throw spurious interrupts.
+  gdo0_pin:
+    number: GPIO26
+    mode:
+      input: true
+      pulldown: true
+  # IMPORTANT: clone CC1101 boards have a crystal offset. The default 0x7a may be
+  # heard but never decoded. Run tools/03-freq0-finder.yaml and put YOUR value here.
+  freq0: 0xD0
+  freq1: 0x71
+  freq2: 0x21
+
+# ONE ESP + ONE CC1101 can drive MANY blinds - just add a cover per blind. Each blind has
+# its own remote, so each cover gets its own blind_address / channel / remote_address (read
+# from that blind's DEBUG log). If a blind receives fine but ignores transmits, recover its
+# encryption constant with tools/recover_seed_constant.py and set `seed_constant:` for it.
+cover:
+  - platform: elero
+    name: "Rolladen Living Room"
+    # ---- all values below come from your DEBUG log (see README) ----
+    blind_address: 0x000021
+    channel: 33
+    remote_address: 0x8aa801
+    pck_inf1: 0x45        # 0x45 => short len=27 packet (UniTec); >0x60 => len=29 (TempoTel)
+    pck_inf2: 0x10
+    hop: 0x0a
+    payload_1: 0x00
+    payload_2: 0x02
+    command_up: 0x20
+    command_stop: 0x10
+    command_down: 0x40
+    command_check: 0x00
+    seed_constant: 0x4751   # per-blind encryption constant C (default 0x4751)
+    open_duration: 25s
+    close_duration: 25s
+    # 'never' keeps the component from transmitting status polls on its own. Set to e.g.
+    # 5min if you want it to query blind state (it will transmit to do so).
+    poll_interval: never
+
+  # --- second blind (its own remote). Fill in values from ITS DEBUG log. ---
+  # - platform: elero
+  #   name: "Rolladen Bedroom"
+  #   blind_address: 0x0000XX
+  #   channel: YY
+  #   remote_address: 0xZZZZZZ
+  #   pck_inf1: 0x45
+  #   pck_inf2: 0x10
+  #   hop: 0x0a
+  #   payload_1: 0x00
+  #   payload_2: 0x02
+  #   command_up: 0x20
+  #   command_stop: 0x10
+  #   command_down: 0x40
+  #   seed_constant: 0x4751   # if this blind ignores TX, recover its own C
+  #   open_duration: 25s
+  #   close_duration: 25s
+  #   poll_interval: never
