@@ -1,41 +1,49 @@
 # esphome-elero-unitec
 
-Control **Elero** roller blinds (Rolladen) from **Home Assistant** with an **ESP32 + CC1101**
-868 MHz module running **ESPHome**. Works with **Elero UniTec‑868** remotes (the short `len=27`
-packet variant).
+Control **Elero** roller blinds (Rolladen) from **Home Assistant** with a cheap **ESP32 + CC1101**
+868 MHz radio running **ESPHome**. Made for **Elero UniTec‑868** remotes.
 
-Fork of [andyboeh/esphome-elero](https://github.com/andyboeh/esphome-elero) with two fixes for
-cheap CC1101 clones + UniTec remotes:
+It works by **pretending to be a remote you already own**. Elero uses a two‑way, rolling‑code
+signal, so you can't just add a new remote — instead the ESP32 listens to your real remote,
+learns its identity, and then sends matching signals (always keeping the rolling code one step
+ahead).
 
-- **Per‑module frequency calibration** — clone crystals are off enough that the stock `freq0`
-  *hears* the remote but never *decodes* it. A sweep tool finds the right value.
-- **Counter‑derived encryption seed** (`len=27`) — `seed = (C − cnt·0x708f) & 0xffff`, so
-  transmitted packets match the real remote byte‑for‑byte.
+This is a fork of [andyboeh/esphome-elero](https://github.com/andyboeh/esphome-elero) with two
+fixes needed for cheap CC1101 clones and UniTec remotes:
 
-> Hobby fork of an early‑stage component — expect some bring‑up work.
+- **Frequency calibration** — clone radios are slightly off‑frequency: they *hear* the remote
+  but can't *decode* it. A small tool finds the correct setting for your board.
+- **Correct encryption** — UniTec signals are scrambled with a code that changes on every press.
+  This fork reproduces it exactly, so the blind accepts the commands.
 
-## How it works
-
-Elero is a **bidirectional, rolling‑code** 868 MHz protocol. You can't pair a new remote — the
-component **impersonates one you already own**: it receives your remote to learn its identity,
-then transmits look‑alike packets, keeping the rolling counter one step ahead (auto‑synced
-whenever it hears the real remote).
+> A hobby fork of an early‑stage project — expect a little setup work.
 
 ## Hardware
 
-Any **ESP32** + a **CC1101 868 MHz** module (green clones are fine). Uses software SPI; GDO0 is
-polled, not used as an interrupt.
+You need an **ESP32** board, a **CC1101 868 MHz** module (cheap green clones are fine), some
+jumper wires, and a soldering iron for the antenna.
 
-| CC1101 | ESP32 |
-|---|---|
-| VCC | 3V3 (3.3 V only) |
-| GND | GND |
-| SCK | GPIO18 |
-| MOSI | GPIO23 |
-| MISO | GPIO19 |
-| CSN | GPIO4 |
-| GDO0 | GPIO26 |
-| ANT | coil antenna — **must be soldered on** |
+Wire the CC1101 to the ESP32 like this:
+
+```
+  CC1101                 ESP32
+  ──────                 ─────
+  VCC  ───────────────►  3V3        ⚠  3.3 V only — never 5 V
+  GND  ───────────────►  GND
+  SCK  ───────────────►  GPIO18
+  MOSI ───────────────►  GPIO23
+  MISO ───────────────►  GPIO19
+  CSN  ───────────────►  GPIO4
+  GDO0 ───────────────►  GPIO26
+  ANT  ── solder the coil antenna here
+```
+
+A few things that matter:
+
+- **Solder the antenna** to the ANT pad — without it the radio is nearly deaf.
+- If reception is flaky, **re‑check the MISO wire** first — a loose one looks exactly like a
+  software bug.
+- Pins are configurable in YAML; these are just the defaults.
 
 ## Setup
 
@@ -46,23 +54,23 @@ external_components:
   - source: { type: local, path: components }
 ```
 
-**2. Bring‑up** — flash these in order and watch the logs. They talk to the chip directly, so
-they separate hardware faults from software ones:
+**2. Bring‑up** — flash these in order and watch the logs. They talk to the radio directly, so
+they tell hardware problems apart from software ones:
 
-| Tool | Confirms |
+| Tool | What it confirms |
 |---|---|
-| `tools/01-cc1101-selftest.yaml` | chip + SPI alive |
-| `tools/02-rssi-peak-meter.yaml` | antenna hears the remote |
-| `tools/03-freq0-finder.yaml` | **your `freq0`** (clone offset) — put it in your config |
+| `tools/01-cc1101-selftest.yaml` | the chip is alive and wired right |
+| `tools/02-rssi-peak-meter.yaml` | the antenna actually hears your remote |
+| `tools/03-freq0-finder.yaml` | **your `freq0` value** — put it in your config |
 
-(If `03` finds nothing, `tools/04-freq-wide-finder.yaml` sweeps wider. See
+(If `03` finds nothing, `tools/04-freq-wide-finder.yaml` searches a wider range. Details in
 [`tools/README.md`](tools/README.md).)
 
 **3. Read your blind's values** — flash [`example.yaml`](example.yaml) with
-`logger: level: DEBUG`, press your remote, and read the `rcv'd:` line (use the one where
+`logger: level: DEBUG`, press your remote, and read the `rcv'd:` line (pick the one where
 `src == bwd == fwd`):
 
-| Config key | Log field |
+| Config key | Comes from |
 |---|---|
 | `remote_address` | `src` |
 | `blind_address` | `dst` |
@@ -70,33 +78,35 @@ they separate hardware faults from software ones:
 | `pck_inf1` / `pck_inf2` | `typ` / `typ2` |
 | `hop` | `hop` |
 | `payload_1` / `payload_2` | payload[0] / payload[1] |
-| `command_up` / `stop` / `down` | 5th payload byte on UP / STOP / DOWN |
+| `command_up` / `stop` / `down` | the 5th payload byte when you press UP / STOP / DOWN |
 
-Fill them into `example.yaml`, switch to `logger: level: INFO`, flash — the `Rolladen` cover
-appears in Home Assistant.
+Put them in `example.yaml`, switch to `logger: level: INFO`, and flash — the `Rolladen` cover
+shows up in Home Assistant.
 
 ## Multiple blinds
 
-One ESP/CC1101 drives many blinds — add a `cover:` per blind with its own
-`blind_address` / `channel` / `remote_address`. Separate remotes never clash (counters are
-tracked per remote). Each cover takes a `seed_constant:` (default `0x4751`); if a blind
-receives fine but ignores transmits, recover its constant with
-[`tools/recover_seed_constant.py`](tools/recover_seed_constant.py) — see
-[`docs/finding-the-seed-constant.md`](docs/finding-the-seed-constant.md).
+One ESP + radio can drive many blinds. Add a `cover:` entry per blind with its own
+`blind_address` / `channel` / `remote_address`. Separate remotes never clash (each one's rolling
+code is tracked on its own).
+
+Each cover also has a `seed_constant:` (default `0x4751`). If a blind *receives* fine but
+*ignores* commands, it uses a different code — recover it with
+[`tools/recover_seed_constant.py`](tools/recover_seed_constant.py)
+([guide](docs/finding-the-seed-constant.md)).
 
 ## Troubleshooting
 
-| Symptom | Fix |
+| Problem | Fix |
 |---|---|
-| In RX, hears energy, decodes nothing | Frequency offset → run `tools/03-freq0-finder.yaml` |
-| `VERSION=0x00` in self‑test | SPI / MISO wiring |
-| RSSI never jumps on a remote press | Antenna not soldered to ANT |
-| Receives but blind ignores transmits | Wrong `seed_constant` → recover it |
-| Physical remote stops working | Press it a few times to resync the rolling code |
+| Radio is listening but never decodes anything | Wrong frequency → run `tools/03-freq0-finder.yaml` |
+| `VERSION=0x00` in the self‑test | Check the SPI wiring, especially MISO |
+| Signal never jumps when you press the remote | Antenna isn't soldered to ANT |
+| Receives fine but the blind won't move | Wrong `seed_constant` → recover it |
+| Your physical remote stops working | Press it a few times to resync |
 
-Use `logger: level: INFO` for daily use; `DEBUG` adds raw RX/TX for bring‑up.
+Use `logger: level: INFO` for everyday use; `DEBUG` adds the raw radio logs for setup.
 
 ## License
 
-GPLv3 (derivative of GPLv3 work) — see [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).
+GPLv3 (it builds on GPLv3 projects) — see [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).
 Thanks to **andyboeh**, **stanleypa**, and **QuadCorei8085**.
