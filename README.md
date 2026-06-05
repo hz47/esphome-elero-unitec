@@ -110,3 +110,6 @@ Use `logger: level: INFO` for everyday use; `DEBUG` adds the raw radio logs for 
 
 GPLv3 (it builds on GPLv3 projects) — see [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).
 Thanks to **andyboeh**, **stanleypa**, and **QuadCorei8085**.
+
+*Not affiliated with or endorsed by Elero GmbH. "Elero" and "UniTec" are used only to describe
+compatibility.*
